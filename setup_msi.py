@@ -96,6 +96,7 @@ bdist_msi_options = {
     "initial_target_dir": r"[ProgramFiles64Folder]\Overwatch",
     "install_icon": "app_icon.ico",
     "upgrade_code": "{7A82987E-127E-4E76-A833-89945D081977}",
+    "launch_on_finish": True,
     "directories": msi_directories,
     "data": msi_data,
 }
