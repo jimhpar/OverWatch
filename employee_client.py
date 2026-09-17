@@ -211,6 +211,22 @@ from PyQt6.QtWidgets import (QApplication, QSystemTrayIcon, QMenu, QMessageBox,
 from PyQt6.QtGui import QIcon, QPixmap, QImage, QPainter, QColor, QCursor
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, Qt, QEvent, QSize, QPoint
 
+CURSOR_SHAPE_MAP = {
+    "arrow": Qt.CursorShape.ArrowCursor,
+    "ibeam": Qt.CursorShape.IBeamCursor,
+    "wait": Qt.CursorShape.WaitCursor,
+    "cross": Qt.CursorShape.CrossCursor,
+    "sizenwse": Qt.CursorShape.SizeFDiagCursor,
+    "sizenesw": Qt.CursorShape.SizeBDiagCursor,
+    "sizewe": Qt.CursorShape.SizeHorCursor,
+    "sizens": Qt.CursorShape.SizeVerCursor,
+    "sizeall": Qt.CursorShape.SizeAllCursor,
+    "no": Qt.CursorShape.ForbiddenCursor,
+    "hand": Qt.CursorShape.PointingHandCursor,
+    "appstarting": Qt.CursorShape.BusyCursor,
+    "help": Qt.CursorShape.WhatsThisCursor,
+}
+
 from config import Config
 from protocol import Protocol, PacketType
 from updater import (
@@ -746,7 +762,6 @@ class SharedStreamViewer(QDialog):
             self.setWindowIcon(QIcon(icon_path))
 
         self.init_ui()
-        self.installEventFilter(self)
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -854,36 +869,44 @@ class SharedStreamViewer(QDialog):
                 self.viewport.setPixmap(scaled)
 
     def update_frame(self, image_bytes, metadata):
-        self.last_frame_bytes = image_bytes
-        self.last_metadata = metadata
-        self.last_frame_size = (metadata.get("width", 1920), metadata.get("height", 1080))
-        self.render_frame()
+        try:
+            self.last_frame_bytes = image_bytes
+            self.last_metadata = metadata
+            self.last_frame_size = (metadata.get("width", 1920), metadata.get("height", 1080))
+            self.render_frame()
 
-        fps = metadata.get("fps", 0)
-        self.stats_lbl.setText(f"{fps:.1f} FPS | Res: {self.last_frame_size[0]}x{self.last_frame_size[1]}")
+            fps = metadata.get("fps", 0)
+            self.stats_lbl.setText(f"{fps:.1f} FPS | Res: {self.last_frame_size[0]}x{self.last_frame_size[1]}")
 
-        # Update cursor for Photoshop / design tools
-        cursor_info = metadata.get("cursor")
-        if cursor_info:
-            cid = cursor_info.get("id")
-            hx = cursor_info.get("hx", 0)
-            hy = cursor_info.get("hy", 0)
-            png_b64 = cursor_info.get("png")
-            if png_b64:
-                try:
-                    png_data = base64.b64decode(png_b64)
-                    qimg = QImage.fromData(png_data)
-                    qpix = QPixmap.fromImage(qimg)
-                    qcur = QCursor(qpix, hx, hy)
-                    self.cursor_cache[cid] = qcur
-                    self.current_remote_cursor = qcur
-                except Exception:
-                    pass
-            elif cid in self.cursor_cache:
-                self.current_remote_cursor = self.cursor_cache[cid]
+            # Update cursor for Photoshop / design tools
+            cursor_info = metadata.get("cursor")
+            if cursor_info:
+                ctype = cursor_info.get("type")
+                if ctype and ctype in CURSOR_SHAPE_MAP:
+                    self.current_remote_cursor = CURSOR_SHAPE_MAP[ctype]
+                else:
+                    cid = cursor_info.get("id")
+                    hx = cursor_info.get("hx", 0)
+                    hy = cursor_info.get("hy", 0)
+                    png_b64 = cursor_info.get("png")
+                    if png_b64:
+                        try:
+                            png_data = base64.b64decode(png_b64)
+                            qimg = QImage.fromData(png_data)
+                            if not qimg.isNull():
+                                qpix = QPixmap.fromImage(qimg)
+                                qcur = QCursor(qpix, hx, hy)
+                                self.cursor_cache[cid] = qcur
+                                self.current_remote_cursor = qcur
+                        except Exception:
+                            pass
+                    elif cid in self.cursor_cache:
+                        self.current_remote_cursor = self.cursor_cache[cid]
 
-            if self.remote_control_enabled and self.current_remote_cursor:
-                self.viewport.setCursor(self.current_remote_cursor)
+                if self.remote_control_enabled and self.current_remote_cursor:
+                    self.viewport.setCursor(self.current_remote_cursor)
+        except Exception as e:
+            print(f"[SharedStreamViewer update_frame error] {e}")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -941,23 +964,32 @@ class SharedStreamViewer(QDialog):
             self.fs_btn.setChecked(False)
             QTimer.singleShot(50, self.render_frame)
 
-    def eventFilter(self, obj, event):
-        # Handle Escape key to exit fullscreen when remote control is inactive
-        if not self.remote_control_enabled and event.type() == QEvent.Type.KeyPress:
+    def keyPressEvent(self, event):
+        if not self.remote_control_enabled:
             if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
                 self.toggle_fullscreen(False)
-                return True
+                return
+            super().keyPressEvent(event)
+            return
 
-        if self.remote_control_enabled:
-            if obj == self.viewport and event.type() in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+        if not event.isAutoRepeat():
+            self._dispatch_key_event(event)
+
+    def keyReleaseEvent(self, event):
+        if not self.remote_control_enabled:
+            super().keyReleaseEvent(event)
+            return
+
+        if not event.isAutoRepeat():
+            self._dispatch_key_event(event)
+
+    def eventFilter(self, obj, event):
+        if self.remote_control_enabled and obj == self.viewport:
+            if event.type() in (QEvent.Type.MouseMove, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
                 self._dispatch_mouse_event(event)
                 return True
-            elif obj == self.viewport and event.type() == QEvent.Type.Wheel:
+            elif event.type() == QEvent.Type.Wheel:
                 self._dispatch_wheel_event(event)
-                return True
-            elif event.type() in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-                if not event.isAutoRepeat():
-                    self._dispatch_key_event(event)
                 return True
         return super().eventFilter(obj, event)
 
