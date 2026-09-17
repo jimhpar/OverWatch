@@ -54,6 +54,56 @@ def cleanup_installation_residue():
         pass
 
 
+def cleanup_older_installations():
+    """Detects and uninstalls any legacy/duplicate versions of Overwatch or
+    LAN Screen Monitor from Windows Installer so users never have two versions installed."""
+    if sys.platform != "win32":
+        return
+
+    try:
+        import winreg
+        import subprocess
+
+        current_ver = Config.VERSION
+        roots = [winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER]
+        subpaths = [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        ]
+
+        for root in roots:
+            for subpath in subpaths:
+                try:
+                    key = winreg.OpenKey(root, subpath, 0, winreg.KEY_READ)
+                    num_subkeys = winreg.QueryInfoKey(key)[0]
+                    for i in range(num_subkeys):
+                        try:
+                            subkey_name = winreg.EnumKey(key, i)
+                            sub = winreg.OpenKey(key, subkey_name, 0, winreg.KEY_READ)
+                            try:
+                                display_name, _ = winreg.QueryValueEx(sub, "DisplayName")
+                                display_version = ""
+                                try:
+                                    display_version, _ = winreg.QueryValueEx(sub, "DisplayVersion")
+                                except Exception:
+                                    pass
+
+                                name_lower = display_name.lower()
+                                if ("overwatch" in name_lower or "lan screen monitor" in name_lower) and display_version and display_version != current_ver:
+                                    print(f"[Launcher] Found older version: {display_name} v{display_version} ({subkey_name}). Triggering silent removal...")
+                                    if subkey_name.startswith("{") and subkey_name.endswith("}"):
+                                        subprocess.Popen(f'msiexec.exe /x {subkey_name} /qn', shell=True)
+                            finally:
+                                winreg.CloseKey(sub)
+                        except Exception:
+                            pass
+                    winreg.CloseKey(key)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[Launcher] Error during older versions check: {e}")
+
+
 def get_role_config_path():
     """Path to the role configuration file."""
     return os.path.join(os.path.expanduser("~"), "lan_monitor_role.json")
@@ -268,6 +318,7 @@ def main():
 
         # Clean any old leftover files or residue from previous installations/upgrades
         cleanup_installation_residue()
+        cleanup_older_installations()
 
         # Single Instance Protection: ensure QApplication exists for IPC socket
         from PyQt6.QtWidgets import QApplication
