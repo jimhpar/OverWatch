@@ -15,6 +15,37 @@ if sys.platform == "win32":
     import ctypes
     import ctypes.wintypes as wintypes
 
+    # Enable Windows Per-Monitor v2 DPI Awareness at earliest entry
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
+    def ensure_uac_remote_visibility():
+        """Configure Windows to show UAC prompts on interactive desktop so they can be viewed & controlled remotely."""
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
+                0,
+                winreg.KEY_SET_VALUE | winreg.KEY_READ
+            )
+            val, _ = winreg.QueryValueEx(key, "PromptOnSecureDesktop")
+            if val != 0:
+                winreg.SetValueEx(key, "PromptOnSecureDesktop", 0, winreg.REG_DWORD, 0)
+                print("[UAC] Successfully set PromptOnSecureDesktop = 0 for remote visibility.")
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+
+    ensure_uac_remote_visibility()
+
     class POINT(ctypes.Structure):
         _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
 
@@ -60,8 +91,41 @@ if sys.platform == "win32":
     gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
     gdi32.DeleteObject.restype = wintypes.BOOL
 
+    # Standard Windows System Cursors
+    IDC_SYSTEM_CURSORS = {
+        32512: "arrow",
+        32513: "ibeam",
+        32514: "wait",
+        32515: "cross",
+        32642: "sizenwse",
+        32643: "sizenesw",
+        32644: "sizewe",
+        32645: "sizens",
+        32646: "sizeall",
+        32648: "no",
+        32649: "hand",
+        32650: "appstarting",
+        32651: "help"
+    }
+    SYSTEM_CURSOR_HANDLES = {}
+    for _cid, _cname in IDC_SYSTEM_CURSORS.items():
+        try:
+            _h = user32.LoadCursorW(None, ctypes.c_void_p(_cid))
+            if _h:
+                SYSTEM_CURSOR_HANDLES[_h] = _cname
+        except Exception:
+            pass
+
     def capture_active_cursor(cursor_size=32):
-        """Captures active Windows cursor bitmap (Photoshop, Illustrator, CAD tools) & hotspot."""
+        """Captures active Windows cursor bitmap/type (text I-Beam, resize, busy, Photoshop, CAD).
+        Uses strict GDI cleanup to prevent resource leaks."""
+        hdesk = None
+        hdc_screen = None
+        hdc_mem = None
+        hbmp = None
+        old_bmp = None
+        ii_hbmColor = None
+        ii_hbmMask = None
         try:
             hdesk = user32.OpenInputDesktop(0, False, 0x01FF)
             if hdesk:
@@ -70,15 +134,23 @@ if sys.platform == "win32":
             ci = CURSORINFO()
             ci.cbSize = ctypes.sizeof(CURSORINFO)
             if not user32.GetCursorInfo(ctypes.byref(ci)) or not ci.hCursor or not (ci.flags & 1):
-                return None, 0, 0, None
+                return None, 0, 0, None, None
 
-            cursor_handle_id = str(ci.hCursor)
+            cursor_handle = ci.hCursor
+            cursor_handle_id = str(cursor_handle)
 
+            # 1. Match known standard system cursor shape (I-Beam, resize, busy, wait, etc.)
+            if cursor_handle in SYSTEM_CURSOR_HANDLES:
+                return cursor_handle_id, 0, 0, None, SYSTEM_CURSOR_HANDLES[cursor_handle]
+
+            # 2. Custom application cursor (e.g. Photoshop brush, CAD pointer)
             ii = ICONINFO()
-            if not user32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
-                return cursor_handle_id, 0, 0, None
+            if not user32.GetIconInfo(cursor_handle, ctypes.byref(ii)):
+                return cursor_handle_id, 0, 0, None, None
 
             hx, hy = int(ii.xHotspot), int(ii.yHotspot)
+            ii_hbmColor = ii.hbmColor
+            ii_hbmMask = ii.hbmMask
 
             hdc_screen = user32.GetDC(0)
             hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
@@ -95,7 +167,7 @@ if sys.platform == "win32":
             hbmp = gdi32.CreateDIBSection(hdc_screen, ctypes.byref(bih), 0, ctypes.byref(p_bits), 0, 0)
             old_bmp = gdi32.SelectObject(hdc_mem, hbmp)
 
-            user32.DrawIconEx(hdc_mem, 0, 0, ci.hCursor, cursor_size, cursor_size, 0, 0, 0x0003)
+            user32.DrawIconEx(hdc_mem, 0, 0, cursor_handle, cursor_size, cursor_size, 0, 0, 0x0003)
 
             buf = (ctypes.c_ubyte * (cursor_size * cursor_size * 4)).from_address(p_bits.value)
             arr = np.frombuffer(buf, dtype=np.uint8).reshape((cursor_size, cursor_size, 4)).copy()
@@ -105,26 +177,31 @@ if sys.platform == "win32":
                 rgb_sum = np.sum(arr[:, :, :3], axis=2)
                 arr[:, :, 3] = np.where(rgb_sum > 0, 255, 0).astype(np.uint8)
 
-            gdi32.SelectObject(hdc_mem, old_bmp)
-            gdi32.DeleteObject(hbmp)
-            gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(0, hdc_screen)
-            if ii.hbmColor:
-                gdi32.DeleteObject(ii.hbmColor)
-            if ii.hbmMask:
-                gdi32.DeleteObject(ii.hbmMask)
-
             success, png_bytes = cv2.imencode('.png', arr)
-            if success:
-                b64_png = base64.b64encode(png_bytes.tobytes()).decode('utf-8')
-                return cursor_handle_id, hx, hy, b64_png
-            return cursor_handle_id, hx, hy, None
+            b64_png = base64.b64encode(png_bytes.tobytes()).decode('utf-8') if success else None
+            return cursor_handle_id, hx, hy, b64_png, None
+
         except Exception:
-            return None, 0, 0, None
+            return None, 0, 0, None, None
+        finally:
+            if hdc_mem:
+                if old_bmp:
+                    gdi32.SelectObject(hdc_mem, old_bmp)
+                if hbmp:
+                    gdi32.DeleteObject(hbmp)
+                gdi32.DeleteDC(hdc_mem)
+            if hdc_screen:
+                user32.ReleaseDC(0, hdc_screen)
+            if ii_hbmColor:
+                gdi32.DeleteObject(ii_hbmColor)
+            if ii_hbmMask:
+                gdi32.DeleteObject(ii_hbmMask)
+            if hdesk:
+                user32.CloseDesktop(hdesk)
 else:
     winreg = None
     def capture_active_cursor(cursor_size=32):
-        return None, 0, 0, None
+        return None, 0, 0, None, None
 
 from PyQt6.QtWidgets import (QApplication, QSystemTrayIcon, QMenu, QMessageBox,
                              QInputDialog, QWidget, QDialog, QVBoxLayout,
@@ -136,6 +213,14 @@ from PyQt6.QtCore import QObject, pyqtSignal, QTimer, Qt, QEvent, QSize, QPoint
 
 from config import Config
 from protocol import Protocol, PacketType
+from updater import (
+    start_silent_daily_update_check,
+    manual_check_for_updates,
+    show_license_dialog,
+    get_update_bridge,
+    prompt_and_install_update
+)
+from single_instance import SingleInstanceController, bring_window_to_front
 
 # Optional pynput for remote input execution
 try:
@@ -155,6 +240,18 @@ class RemoteInputHandler:
         else:
             self.mouse = None
             self.keyboard = None
+        self.pressed_keys = set()
+
+    def release_all_keys(self):
+        """Release all currently pressed keys to avoid stuck keys."""
+        if not self.keyboard:
+            return
+        for key in list(self.pressed_keys):
+            try:
+                self.keyboard.release(key)
+            except Exception:
+                pass
+        self.pressed_keys.clear()
 
     def handle_event(self, event_type, params):
         if not PYNPUT_AVAILABLE or not self.mouse or not self.keyboard:
@@ -209,50 +306,96 @@ class RemoteInputHandler:
                     if dx:
                         ctypes.windll.user32.mouse_event(0x01000, 0, 0, int(dx * 120), 0)
 
+            elif event_type == "release_all":
+                self.release_all_keys()
+
             elif event_type in ("key_press", "key_release"):
                 key_str = params.get("key", "")
                 key_obj = self._parse_key(key_str)
                 if key_obj:
                     if event_type == "key_press":
                         self.keyboard.press(key_obj)
+                        self.pressed_keys.add(key_obj)
                     else:
                         self.keyboard.release(key_obj)
+                        self.pressed_keys.discard(key_obj)
         except Exception as e:
             print(f"[InputHandler Error] {e}")
 
     def _parse_key(self, key_str):
-        if len(key_str) == 1:
+        if not key_str:
+            return None
+        key_lower = key_str.lower()
+        if len(key_str) == 1 and key_lower not in ("\n", "\r", "\t", " "):
             return key_str
-        # Special key mapping
+
         special_keys = {
             "space": Key.space,
             "enter": Key.enter,
+            "return": Key.enter,
             "backspace": Key.backspace,
             "tab": Key.tab,
             "esc": Key.esc,
+            "escape": Key.esc,
             "shift": Key.shift,
+            "shift_l": getattr(Key, "shift_l", Key.shift),
+            "shift_r": getattr(Key, "shift_r", Key.shift),
             "ctrl": Key.ctrl,
+            "ctrl_l": getattr(Key, "ctrl_l", Key.ctrl),
+            "ctrl_r": getattr(Key, "ctrl_r", Key.ctrl),
             "alt": Key.alt,
+            "alt_l": getattr(Key, "alt_l", Key.alt),
+            "alt_r": getattr(Key, "alt_r", Key.alt),
+            "alt_gr": getattr(Key, "alt_gr", Key.alt),
             "cmd": Key.cmd,
+            "win": Key.cmd,
+            "windows": Key.cmd,
+            "lwin": getattr(Key, "cmd_l", Key.cmd),
+            "rwin": getattr(Key, "cmd_r", Key.cmd),
             "delete": Key.delete,
             "up": Key.up,
             "down": Key.down,
             "left": Key.left,
-            "right": Key.right
+            "right": Key.right,
+            "home": Key.home,
+            "end": Key.end,
+            "page_up": Key.page_up,
+            "page_down": Key.page_down,
+            "pageup": Key.page_up,
+            "pagedown": Key.page_down,
+            "insert": Key.insert,
+            "caps_lock": Key.caps_lock,
+            "num_lock": Key.num_lock,
+            "print_screen": Key.print_screen,
+            "scroll_lock": Key.scroll_lock,
+            "f1": Key.f1,
+            "f2": Key.f2,
+            "f3": Key.f3,
+            "f4": Key.f4,
+            "f5": Key.f5,
+            "f6": Key.f6,
+            "f7": Key.f7,
+            "f8": Key.f8,
+            "f9": Key.f9,
+            "f10": Key.f10,
+            "f11": Key.f11,
+            "f12": Key.f12,
         }
-        return special_keys.get(key_str.lower(), None)
+        return special_keys.get(key_lower, None)
 
 
 class ScreenCapturer:
     """High performance screen capture & compression using MSS and OpenCV."""
     def __init__(self):
         self.sct = mss.mss()
-        self.monitor = self.sct.monitors[1]  # Primary monitor
+        self.monitor = self.sct.monitors[1] if len(self.sct.monitors) > 1 else self.sct.monitors[0]
         self.prev_frame_gray = None
         self.quality_preset = Config.DEFAULT_QUALITY_PRESET
         self.jpeg_quality = Config.QUALITY_PRESETS[self.quality_preset]["jpeg_quality"]
         self.scale = Config.QUALITY_PRESETS[self.quality_preset]["scale"]
         self.last_cursor_id = None
+        self.last_cursor_type = None
+        self._frame_count = 0
 
     def set_preset(self, preset_name):
         if preset_name in Config.QUALITY_PRESETS:
@@ -261,10 +404,36 @@ class ScreenCapturer:
             self.scale = Config.QUALITY_PRESETS[preset_name]["scale"]
 
     def capture_and_compress(self):
-        # Capture raw frame
-        sct_img = self.sct.grab(self.monitor)
-        frame_bgra = np.array(sct_img)
-        frame_bgr = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
+        # Periodically refresh monitor rect in case resolution or display topology changed
+        self._frame_count += 1
+        if self._frame_count % 100 == 0 and len(self.sct.monitors) > 1:
+            self.monitor = self.sct.monitors[1]
+
+        # Windows desktop switch tracking (handles UAC prompts & desktop transitions)
+        if sys.platform == "win32":
+            try:
+                hdesk = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100 | 0x0001 | 0x0040)
+                if hdesk:
+                    ctypes.windll.user32.SetThreadDesktop(hdesk)
+                    ctypes.windll.user32.CloseDesktop(hdesk)
+            except Exception:
+                pass
+
+        # Capture raw frame with fallback handling on desktop switch
+        try:
+            sct_img = self.sct.grab(self.monitor)
+            frame_bgra = np.array(sct_img)
+            frame_bgr = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
+        except Exception:
+            try:
+                # Re-initialize MSS in case desktop switch invalidated display DC
+                self.sct = mss.mss()
+                self.monitor = self.sct.monitors[1] if len(self.sct.monitors) > 1 else self.sct.monitors[0]
+                sct_img = self.sct.grab(self.monitor)
+                frame_bgra = np.array(sct_img)
+                frame_bgr = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
+            except Exception:
+                return None, 1920, 1080, False, None
 
         h, w = frame_bgr.shape[:2]
 
@@ -296,22 +465,25 @@ class ScreenCapturer:
         if not success:
             return None, w, h, False, None
 
-        # Capture active cursor for Photoshop / design tools
+        # Capture active cursor state (text I-Beam, resize, busy/wait, Photoshop, CAD)
         cursor_data = None
-        cid, hx, hy, b64_png = capture_active_cursor()
+        cid, hx, hy, b64_png, ctype = capture_active_cursor()
         if cid:
-            if cid != self.last_cursor_id:
+            cursor_data = {"id": cid, "hx": hx, "hy": hy}
+            if ctype:
+                cursor_data["type"] = ctype
+            if cid != self.last_cursor_id or ctype != self.last_cursor_type:
                 self.last_cursor_id = cid
-                cursor_data = {"id": cid, "hx": hx, "hy": hy, "png": b64_png}
-            else:
-                cursor_data = {"id": cid, "hx": hx, "hy": hy}
+                self.last_cursor_type = ctype
+                if b64_png:
+                    cursor_data["png"] = b64_png
 
         return encoded_img.tobytes(), w, h, is_static, cursor_data
 
 
 class ClientWorker(QObject):
     status_changed = pyqtSignal(str, str) # status_type ('connected', 'disconnected', 'error'), message
-    alert_received = pyqtSignal()
+    alert_received = pyqtSignal(object)
     quality_updated = pyqtSignal(str, int)
     share_started = pyqtSignal(str, str, str, bool) # session_id, source_id, source_name, allow_remote
     share_frame_received = pyqtSignal(str, bytes, dict) # session_id, frame_bytes, metadata
@@ -384,10 +556,12 @@ class ClientWorker(QObject):
 
             except (websockets.exceptions.ConnectionClosed, OSError, asyncio.TimeoutError) as e:
                 self.ws = None
+                self.input_handler.release_all_keys()
                 self.status_changed.emit("disconnected", f"Disconnected. Retrying in 3s... ({e})")
                 await asyncio.sleep(3)
             except Exception as e:
                 self.ws = None
+                self.input_handler.release_all_keys()
                 self.status_changed.emit("error", f"Unexpected error: {e}")
                 await asyncio.sleep(3)
 
@@ -410,7 +584,11 @@ class ClientWorker(QObject):
                     is_static=is_static,
                     cursor_data=cursor_data
                 )
-                await ws.send(pkt)
+                try:
+                    await asyncio.wait_for(ws.send(pkt), timeout=0.8)
+                except asyncio.TimeoutError:
+                    # Skip frame on network congestion so stream stays real-time without buffering lag
+                    pass
 
             fps_counter += 1
             now = time.time()
@@ -446,7 +624,7 @@ class ClientWorker(QObject):
                 self.quality_updated.emit(self.capturer.quality_preset, self.target_fps)
 
             elif pkt_type == PacketType.ALERT:
-                self.alert_received.emit()
+                self.alert_received.emit(pkt.get("image_b64"))
 
             elif pkt_type == PacketType.CLIENT_LIST_UPDATE:
                 clients = pkt.get("clients", [])
@@ -560,6 +738,7 @@ class SharedStreamViewer(QDialog):
             self.resize(1280, 720)
 
         self.setStyleSheet("background-color: #0F172A; color: #F8FAFC;")
+        self.setWindowFlags(Qt.WindowType.Window)
 
         bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         icon_path = os.path.join(bundle_dir, "app_icon.ico")
@@ -1042,36 +1221,146 @@ class RequestPromptDialog(QDialog):
         self.reject()
 
 
-class FlashAlertWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+class AttentionAlertModal(QDialog):
+    """
+    Full Attention Alert popup window.
+    Displays Attention.jpg with the exact same dimensions as the image
+    (proportionally fitted if client's screen is smaller).
+    Pops up to the foreground so the user sees it immediately.
+    """
+    def __init__(self, image_b64=None, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        
-        self.setStyleSheet("background-color: transparent; border: 15px solid rgba(255, 0, 0, 0.8);")
-        
-        # Flash counter
-        self.flash_count = 0
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.toggle_flash)
-        self.timer.start(250)
+        self.setStyleSheet("background-color: transparent;")
 
-    def toggle_flash(self):
-        self.flash_count += 1
-        if self.flash_count > 12:  # 12 toggles * 250ms = 3 seconds
-            self.timer.stop()
-            self.close()
-            self.deleteLater()
-            return
-            
-        if self.isVisible():
-            self.hide()
+        # Load Attention.jpg
+        pixmap = self._load_attention_pixmap(image_b64)
+        if not pixmap or pixmap.isNull():
+            pixmap = QPixmap(600, 600)
+            pixmap.fill(QColor("#EF4444"))
+            painter = QPainter(pixmap)
+            painter.setPen(QColor("#FFFFFF"))
+            font = painter.font()
+            font.setPointSize(24)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "⚠️ ATTENTION REQUIRED ⚠️")
+            painter.end()
+
+        orig_w = pixmap.width()
+        orig_h = pixmap.height()
+
+        # Exact image dimensions, proportionally scaled down if screen is smaller than image
+        screen = QApplication.primaryScreen()
+        if screen:
+            avail = screen.availableGeometry()
+            max_w = int(avail.width() * 0.92)
+            max_h = int(avail.height() * 0.92)
+            if orig_w > max_w or orig_h > max_h:
+                scale = min(max_w / orig_w, max_h / orig_h)
+                target_w = max(100, int(orig_w * scale))
+                target_h = max(100, int(orig_h * scale))
+            else:
+                target_w, target_h = orig_w, orig_h
         else:
-            self.showFullScreen()
-            self.raise_()
-            self.activateWindow()
-            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+            target_w, target_h = min(orig_w, 1200), min(orig_h, 1200)
+
+        self.setFixedSize(target_w, target_h)
+
+        # Center on screen
+        if screen:
+            geo = screen.geometry()
+            x = geo.x() + (geo.width() - target_w) // 2
+            y = geo.y() + (geo.height() - target_h) // 2
+            self.move(x, y)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        container = QFrame(self)
+        container.setObjectName("AttentionCard")
+        container.setStyleSheet("""
+            QFrame#AttentionCard {
+                background-color: #0F172A;
+                border: 2px solid #00F3FF;
+                border-radius: 12px;
+            }
+        """)
+        c_layout = QVBoxLayout(container)
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        c_layout.setSpacing(0)
+
+        img_lbl = QLabel(container)
+        img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        scaled_pixmap = pixmap.scaled(
+            target_w, target_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        img_lbl.setPixmap(scaled_pixmap)
+        c_layout.addWidget(img_lbl)
+
+        # Floating Close Button
+        close_btn = QPushButton("✕", container)
+        close_btn.setFixedSize(36, 36)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(15, 23, 42, 0.85);
+                color: #FFFFFF;
+                border: 2px solid #EF4444;
+                border-radius: 18px;
+                font-weight: bold;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background-color: #EF4444;
+                color: #FFFFFF;
+            }
+        """)
+        close_btn.move(target_w - 48, 12)
+        close_btn.clicked.connect(self.close)
+
+        layout.addWidget(container)
+
+    def _load_attention_pixmap(self, image_b64):
+        candidates = [
+            getattr(sys, '_MEIPASS', ''),
+            os.path.dirname(sys.executable),
+            os.path.dirname(os.path.abspath(__file__)),
+            os.getcwd(),
+        ]
+        for c in candidates:
+            if not c:
+                continue
+            p = os.path.join(c, "Attention.jpg")
+            if os.path.exists(p):
+                pm = QPixmap(p)
+                if not pm.isNull():
+                    return pm
+
+        if image_b64:
+            try:
+                raw_bytes = base64.b64decode(image_b64)
+                img = QImage()
+                if img.loadFromData(raw_bytes):
+                    return QPixmap.fromImage(img)
+            except Exception:
+                pass
+        return None
+
+    def mousePressEvent(self, event):
+        self.close()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Space):
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+
+FlashAlertWindow = AttentionAlertModal
 
 
 def create_tray_icon_pixmap(color_hex="#00F3FF"):
@@ -1605,8 +1894,9 @@ class ClientMessengerPanel(QWidget):
 
 
 class EmployeeClientTrayApp(QWidget):
-    def __init__(self):
+    def __init__(self, instance_controller=None):
         super().__init__()
+        self.instance_controller = instance_controller
         self.settings_file = os.path.join(os.path.expanduser("~"), Config.CLIENT_SETTINGS_FILE)
         self.server_ip = Config.get_local_ip()
         self.server_port = Config.DEFAULT_PORT
@@ -1629,6 +1919,19 @@ class EmployeeClientTrayApp(QWidget):
         self.panel = ClientMessengerPanel(self)
         self.init_tray()
 
+        # Connect single instance activation handler
+        if self.instance_controller:
+            def handle_activate(_msg):
+                self.toggle_panel()
+                if hasattr(self, 'tray') and self.tray.isVisible():
+                    self.tray.showMessage(
+                        "Overwatch Running",
+                        "Overwatch is already running and active in your system tray.",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        4000
+                    )
+            self.instance_controller.activated.connect(handle_activate)
+
         # On first launch, require both employee name and server IP
         if not self.has_custom_name:
             self.is_first_launch = True
@@ -1639,6 +1942,11 @@ class EmployeeClientTrayApp(QWidget):
             self.prompt_server_ip(first_time=True)
 
         self.start_worker()
+
+        # Daily silent update check
+        self.update_bridge = get_update_bridge()
+        self.update_bridge.update_found.connect(lambda rel: prompt_and_install_update(self, rel))
+        start_silent_daily_update_check()
 
     def load_settings(self):
         self.has_custom_name = False
@@ -1671,6 +1979,7 @@ class EmployeeClientTrayApp(QWidget):
                     "quality_preset": cur_preset,
                     "target_fps": cur_fps
                 }, f, indent=2)
+            print(f"[Settings] Saved settings to {self.settings_file}")
         except Exception as e:
             print(f"[Save Settings Error] {e}")
 
@@ -1697,6 +2006,14 @@ class EmployeeClientTrayApp(QWidget):
 
         change_server_action = menu.addAction("⚙️ Configure Master Server IP...")
         change_server_action.triggered.connect(self.prompt_server_ip)
+
+        menu.addSeparator()
+
+        check_update_action = menu.addAction("🔄 Check for Updates...")
+        check_update_action.triggered.connect(lambda: manual_check_for_updates(self))
+
+        view_license_action = menu.addAction("📜 View License...")
+        view_license_action.triggered.connect(lambda: show_license_dialog(self))
 
         menu.addSeparator()
 
@@ -1774,13 +2091,21 @@ class EmployeeClientTrayApp(QWidget):
             except Exception:
                 pass
 
-        dlg = RequestPromptDialog(req_id, req_id_str, req_name, target_id, action_type, parent=self)
+        dlg = RequestPromptDialog(req_id, req_id_str, req_name, target_id, action_type, parent=None)
         self.current_prompt_dialog = dlg
         dlg.accepted_signal.connect(lambda r_id, r_id_s, t_id, act: self.worker.send_peer_prompt_response(r_id, r_id_s, t_id, True, act))
         dlg.declined_signal.connect(lambda r_id, r_id_s, t_id, act: self.worker.send_peer_prompt_response(r_id, r_id_s, t_id, False, act))
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+        # Force pop-up directly in front of the user so they see the request first
+        bring_window_to_front(dlg, momentary_topmost=True)
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
+            pass
 
     def on_peer_request_resolved(self, req_id):
         if self.current_prompt_dialog and self.current_prompt_dialog.request_id == req_id:
@@ -1810,7 +2135,7 @@ class EmployeeClientTrayApp(QWidget):
             passcode=self.passcode
         )
         self.worker.status_changed.connect(self.on_status_changed)
-        self.worker.alert_received.connect(self.show_flashing_alert)
+        self.worker.alert_received.connect(self.show_attention_alert)
         self.worker.quality_updated.connect(lambda p, f: self.save_settings())
         self.worker.share_started.connect(self.on_share_started)
         self.worker.share_frame_received.connect(self.on_share_frame_received)
@@ -1839,6 +2164,23 @@ class EmployeeClientTrayApp(QWidget):
         viewer.raise_()
         viewer.activateWindow()
 
+        # Force pop-up to foreground so the user sees the shared stream first
+        bring_window_to_front(viewer, momentary_topmost=True)
+
+        # Notify user with tray message and audio chime
+        if hasattr(self, 'tray') and self.tray.isVisible():
+            self.tray.showMessage(
+                "📺 Screen Share Started",
+                f"{source_name} is sharing their screen with you.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000
+            )
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            pass
+
     def on_share_frame_received(self, session_id, frame_bytes, metadata):
         if session_id in self.active_shared_viewers:
             self.active_shared_viewers[session_id].update_frame(frame_bytes, metadata)
@@ -1858,12 +2200,29 @@ class EmployeeClientTrayApp(QWidget):
         else:
             self.tray.setIcon(QIcon(create_tray_icon_pixmap("#EF4444"))) # Red
 
-    def show_flashing_alert(self):
-        self.flash_window = FlashAlertWindow()
-        self.flash_window.showFullScreen()
-        self.flash_window.raise_()
-        self.flash_window.activateWindow()
-        self.flash_window.setWindowState(self.flash_window.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+    def show_attention_alert(self, image_b64=None):
+        if hasattr(self, 'attention_alert_modal') and self.attention_alert_modal:
+            try:
+                self.attention_alert_modal.close()
+                self.attention_alert_modal.deleteLater()
+            except Exception:
+                pass
+
+        self.attention_alert_modal = AttentionAlertModal(image_b64=image_b64, parent=None)
+        self.attention_alert_modal.show()
+        self.attention_alert_modal.raise_()
+        self.attention_alert_modal.activateWindow()
+
+        # Force foreground pop-up so user sees it immediately
+        bring_window_to_front(self.attention_alert_modal, momentary_topmost=True)
+
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
+            pass
+
+    show_flashing_alert = show_attention_alert
 
     def prompt_employee_name(self, first_time=False):
         title = "Setup Employee Name" if first_time else "Change Employee Name"
@@ -1948,21 +2307,29 @@ class EmployeeClientTrayApp(QWidget):
             print(f"[Auto-Startup Error] {e}")
 
 
-def main():
+def main(instance_controller=None):
     if sys.platform == "win32":
         import ctypes
-        myappid = "blackbox.overwatch.lanmonitor.4_6_1"
+        myappid = "blackbox.overwatch.lanmonitor.4_7_0"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
-    app = QApplication(sys.argv)
-    
+    app = QApplication.instance()
+    if not app:
+        app = QApplication(sys.argv)
+
+    if instance_controller is None:
+        instance_controller = SingleInstanceController()
+        if instance_controller.is_already_running():
+            print("[Client] Another Overwatch instance is already running. Exiting.")
+            sys.exit(0)
+
     bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     icon_path = os.path.join(bundle_dir, "app_icon.ico")
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
     app.setQuitOnLastWindowClosed(False)
-    client_app = EmployeeClientTrayApp()
+    client_app = EmployeeClientTrayApp(instance_controller=instance_controller)
     sys.exit(app.exec())
 
 

@@ -26,6 +26,34 @@ def get_app_dir():
         return os.path.dirname(os.path.abspath(__file__))
 
 
+def cleanup_installation_residue():
+    """Purges orphaned .pyc, __pycache__, and temporary files from the installation
+    directory to guarantee a completely clean installation/upgrade with no residue."""
+    app_dir = get_app_dir()
+    if not os.path.exists(app_dir):
+        return
+
+    try:
+        for root, dirs, files in os.walk(app_dir, topdown=False):
+            # Clean up __pycache__ folders
+            for d in list(dirs):
+                if d == "__pycache__":
+                    try:
+                        import shutil
+                        shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                    except Exception:
+                        pass
+            # Clean up stale .pyc, .pyo, .tmp, or old crash dumps
+            for f in files:
+                if f.endswith(('.pyc', '.pyo', '.tmp', '.bak')) or f.startswith('tmp_'):
+                    try:
+                        os.remove(os.path.join(root, f))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
 def get_role_config_path():
     """Path to the role configuration file."""
     return os.path.join(os.path.expanduser("~"), "lan_monitor_role.json")
@@ -207,24 +235,51 @@ def show_role_selector():
     return selected_role[0]
 
 
-def launch_manager():
+def launch_manager(instance_controller=None):
     """Start the Master Dashboard."""
     from master_dashboard import main as master_main
-    master_main()
+    master_main(instance_controller=instance_controller)
 
 
-def launch_client():
+def launch_client(instance_controller=None):
     """Start the Employee Client."""
     from employee_client import main as client_main
-    client_main()
+    client_main(instance_controller=instance_controller)
 
 
 def main():
     try:
         if sys.platform == "win32":
             import ctypes
-            myappid = "blackbox.overwatch.lanmonitor.4_6_1"
+            try:
+                # Per-Monitor v2 DPI Awareness (prevents zoom/cropping artifacts)
+                ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+            except Exception:
+                try:
+                    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                except Exception:
+                    try:
+                        ctypes.windll.user32.SetProcessDPIAware()
+                    except Exception:
+                        pass
+
+            myappid = "blackbox.overwatch.lanmonitor.4_7_0"
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
+        # Clean any old leftover files or residue from previous installations/upgrades
+        cleanup_installation_residue()
+
+        # Single Instance Protection: ensure QApplication exists for IPC socket
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if not app:
+            app = QApplication(sys.argv)
+
+        from single_instance import SingleInstanceController
+        instance_controller = SingleInstanceController()
+        if instance_controller.is_already_running():
+            print("[Launcher] Another Overwatch instance is already running. Signaled existing instance to activate. Exiting cleanly.")
+            sys.exit(0)
 
         # Check for --switch-role flag to force role selection
         force_select = "--switch-role" in sys.argv
@@ -241,9 +296,9 @@ def main():
             sys.exit(0)
 
         if role == "manager":
-            launch_manager()
+            launch_manager(instance_controller)
         elif role == "client":
-            launch_client()
+            launch_client(instance_controller)
         else:
             print(f"[Launcher] Unknown role: {role}")
             sys.exit(1)

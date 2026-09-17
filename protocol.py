@@ -88,11 +88,14 @@ class Protocol:
         })
 
     @staticmethod
-    def create_alert_packet():
-        return json.dumps({
+    def create_alert_packet(image_b64=None):
+        payload = {
             "type": PacketType.ALERT,
             "timestamp": time.time()
-        })
+        }
+        if image_b64:
+            payload["image_b64"] = image_b64
+        return json.dumps(payload)
 
     @staticmethod
     def create_share_start(session_id, source_id, source_name, allow_remote_control=True):

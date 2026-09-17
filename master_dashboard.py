@@ -17,6 +17,18 @@ if sys.platform == "win32":
     import ctypes
     import ctypes.wintypes as wintypes
 
+    # Enable Windows Per-Monitor v2 DPI Awareness at earliest entry
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
     class POINT(ctypes.Structure):
         _fields_ = [('x', wintypes.LONG), ('y', wintypes.LONG)]
 
@@ -62,8 +74,40 @@ if sys.platform == "win32":
     gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
     gdi32.DeleteObject.restype = wintypes.BOOL
 
+    # Standard Windows System Cursors
+    IDC_SYSTEM_CURSORS = {
+        32512: "arrow",
+        32513: "ibeam",
+        32514: "wait",
+        32515: "cross",
+        32642: "sizenwse",
+        32643: "sizenesw",
+        32644: "sizewe",
+        32645: "sizens",
+        32646: "sizeall",
+        32648: "no",
+        32649: "hand",
+        32650: "appstarting",
+        32651: "help"
+    }
+    SYSTEM_CURSOR_HANDLES = {}
+    for _cid, _cname in IDC_SYSTEM_CURSORS.items():
+        try:
+            _h = user32.LoadCursorW(None, ctypes.c_void_p(_cid))
+            if _h:
+                SYSTEM_CURSOR_HANDLES[_h] = _cname
+        except Exception:
+            pass
+
     def capture_active_cursor(cursor_size=32):
-        """Captures active Windows cursor bitmap (Photoshop, Illustrator, CAD tools) & hotspot."""
+        """Captures active Windows cursor bitmap/type with strict GDI cleanup."""
+        hdesk = None
+        hdc_screen = None
+        hdc_mem = None
+        hbmp = None
+        old_bmp = None
+        ii_hbmColor = None
+        ii_hbmMask = None
         try:
             hdesk = user32.OpenInputDesktop(0, False, 0x01FF)
             if hdesk:
@@ -72,15 +116,21 @@ if sys.platform == "win32":
             ci = CURSORINFO()
             ci.cbSize = ctypes.sizeof(CURSORINFO)
             if not user32.GetCursorInfo(ctypes.byref(ci)) or not ci.hCursor or not (ci.flags & 1):
-                return None, 0, 0, None
+                return None, 0, 0, None, None
 
-            cursor_handle_id = str(ci.hCursor)
+            cursor_handle = ci.hCursor
+            cursor_handle_id = str(cursor_handle)
+
+            if cursor_handle in SYSTEM_CURSOR_HANDLES:
+                return cursor_handle_id, 0, 0, None, SYSTEM_CURSOR_HANDLES[cursor_handle]
 
             ii = ICONINFO()
-            if not user32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
-                return cursor_handle_id, 0, 0, None
+            if not user32.GetIconInfo(cursor_handle, ctypes.byref(ii)):
+                return cursor_handle_id, 0, 0, None, None
 
             hx, hy = int(ii.xHotspot), int(ii.yHotspot)
+            ii_hbmColor = ii.hbmColor
+            ii_hbmMask = ii.hbmMask
 
             hdc_screen = user32.GetDC(0)
             hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
@@ -97,35 +147,153 @@ if sys.platform == "win32":
             hbmp = gdi32.CreateDIBSection(hdc_screen, ctypes.byref(bih), 0, ctypes.byref(p_bits), 0, 0)
             old_bmp = gdi32.SelectObject(hdc_mem, hbmp)
 
-            user32.DrawIconEx(hdc_mem, 0, 0, ci.hCursor, cursor_size, cursor_size, 0, 0, 0x0003)
+            user32.DrawIconEx(hdc_mem, 0, 0, cursor_handle, cursor_size, cursor_size, 0, 0, 0x0003)
 
             buf = (ctypes.c_ubyte * (cursor_size * cursor_size * 4)).from_address(p_bits.value)
             arr = np.frombuffer(buf, dtype=np.uint8).reshape((cursor_size, cursor_size, 4)).copy()
 
-            # If alpha channel is all zeros (monochrome / standard inverted cursor), create alpha from RGB presence
             if not np.any(arr[:, :, 3] > 0):
                 rgb_sum = np.sum(arr[:, :, :3], axis=2)
                 arr[:, :, 3] = np.where(rgb_sum > 0, 255, 0).astype(np.uint8)
 
-            gdi32.SelectObject(hdc_mem, old_bmp)
-            gdi32.DeleteObject(hbmp)
-            gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(0, hdc_screen)
-            if ii.hbmColor:
-                gdi32.DeleteObject(ii.hbmColor)
-            if ii.hbmMask:
-                gdi32.DeleteObject(ii.hbmMask)
-
             success, png_bytes = cv2.imencode('.png', arr)
-            if success:
-                b64_png = base64.b64encode(png_bytes.tobytes()).decode('utf-8')
-                return cursor_handle_id, hx, hy, b64_png
-            return cursor_handle_id, hx, hy, None
+            b64_png = base64.b64encode(png_bytes.tobytes()).decode('utf-8') if success else None
+            return cursor_handle_id, hx, hy, b64_png, None
+
         except Exception:
-            return None, 0, 0, None
+            return None, 0, 0, None, None
+        finally:
+            if hdc_mem:
+                if old_bmp:
+                    gdi32.SelectObject(hdc_mem, old_bmp)
+                if hbmp:
+                    gdi32.DeleteObject(hbmp)
+                gdi32.DeleteDC(hdc_mem)
+            if hdc_screen:
+                user32.ReleaseDC(0, hdc_screen)
+            if ii_hbmColor:
+                gdi32.DeleteObject(ii_hbmColor)
+            if ii_hbmMask:
+                gdi32.DeleteObject(ii_hbmMask)
+            if hdesk:
+                user32.CloseDesktop(hdesk)
+
+    WH_KEYBOARD_LL = 13
+    WM_KEYDOWN = 0x0100
+    WM_KEYUP = 0x0101
+    WM_SYSKEYDOWN = 0x0104
+    WM_SYSKEYUP = 0x0105
+    VK_TAB = 0x09
+    VK_ESCAPE = 0x1B
+    VK_SPACE = 0x20
+    VK_LWIN = 0x5B
+    VK_RWIN = 0x5C
+    VK_F4 = 0x73
+    LLKHF_ALTDOWN = 0x20
+
+    HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+    class KBDLLHOOKSTRUCT(ctypes.Structure):
+        _fields_ = [
+            ('vkCode', wintypes.DWORD),
+            ('scanCode', wintypes.DWORD),
+            ('flags', wintypes.DWORD),
+            ('time', wintypes.DWORD),
+            ('dwExtraInfo', ctypes.c_ulong)
+        ]
+
+    user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+    user32.SetWindowsHookExW.restype = wintypes.HHOOK
+    user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
+    user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+    user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+    user32.CallNextHookEx.restype = ctypes.c_long
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetKeyState.argtypes = [ctypes.c_int]
+    user32.GetKeyState.restype = wintypes.SHORT
+
+    class WindowsKeyboardHook:
+        """Low-level Windows keyboard hook (WH_KEYBOARD_LL) to intercept and isolate
+        system shortcuts (Alt+Tab, Win key, Alt+F4, Ctrl+Esc) so they execute exclusively
+        on the remote client and do NOT trigger locally on the Admin PC."""
+
+        def __init__(self, key_callback):
+            self.key_callback = key_callback
+            self.hook = None
+            self._c_callback = None
+            self.active = False
+            self.target_window_hwnd = None
+
+        def set_target_hwnd(self, hwnd):
+            self.target_window_hwnd = hwnd
+
+        def install(self):
+            if self.hook:
+                return
+            try:
+                def _proc(nCode, wParam, lParam):
+                    if nCode >= 0 and self.active:
+                        try:
+                            fg_hwnd = user32.GetForegroundWindow()
+                            if self.target_window_hwnd and fg_hwnd != self.target_window_hwnd:
+                                return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+                            kb = KBDLLHOOKSTRUCT.from_address(lParam)
+                            is_down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                            vk = kb.vkCode
+                            flags = kb.flags
+                            alt_down = bool(flags & LLKHF_ALTDOWN)
+
+                            # 1. Windows Key (VK_LWIN = 0x5B, VK_RWIN = 0x5C)
+                            if vk in (VK_LWIN, VK_RWIN):
+                                self.key_callback("win", is_down)
+                                return 1
+
+                            # 2. Alt+Tab
+                            if vk == VK_TAB and alt_down:
+                                self.key_callback("tab", is_down)
+                                return 1
+
+                            # 3. Alt+F4
+                            if vk == VK_F4 and alt_down:
+                                self.key_callback("f4", is_down)
+                                return 1
+
+                            # 4. Alt+Space
+                            if vk == VK_SPACE and alt_down:
+                                self.key_callback("space", is_down)
+                                return 1
+
+                            # 5. Ctrl+Esc
+                            ctrl_down = bool(user32.GetKeyState(0x11) & 0x8000)
+                            if vk == VK_ESCAPE and (ctrl_down or alt_down):
+                                self.key_callback("esc", is_down)
+                                return 1
+
+                        except Exception:
+                            pass
+
+                    return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+                self._c_callback = HOOKPROC(_proc)
+                self.hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._c_callback, None, 0)
+                self.active = bool(self.hook)
+            except Exception as e:
+                print(f"[WindowsKeyboardHook Install Error] {e}")
+
+        def uninstall(self):
+            if self.hook:
+                try:
+                    user32.UnhookWindowsHookEx(self.hook)
+                except Exception:
+                    pass
+                self.hook = None
+                self._c_callback = None
+                self.active = False
 else:
     def capture_active_cursor(cursor_size=32):
-        return None, 0, 0, None
+        return None, 0, 0, None, None
+    WindowsKeyboardHook = None
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QGridLayout, QLabel, QPushButton,
@@ -139,6 +307,14 @@ import mss
 
 from config import Config
 from protocol import Protocol, PacketType
+from updater import (
+    start_silent_daily_update_check,
+    manual_check_for_updates,
+    show_license_dialog,
+    get_update_bridge,
+    prompt_and_install_update
+)
+from single_instance import SingleInstanceController, bring_window_to_front
 
 # Optional pynput for admin remote input execution
 try:
@@ -148,6 +324,32 @@ try:
 except ImportError:
     PYNPUT_AVAILABLE = False
 
+
+_attention_b64_cache = None
+
+def get_attention_image_b64():
+    """Load and cache base64 encoded Attention.jpg for alert popups."""
+    global _attention_b64_cache
+    if _attention_b64_cache is not None:
+        return _attention_b64_cache
+    candidates = [
+        getattr(sys, '_MEIPASS', ''),
+        os.path.dirname(sys.executable),
+        os.path.dirname(os.path.abspath(__file__)),
+        os.getcwd(),
+    ]
+    for c in candidates:
+        if not c:
+            continue
+        p = os.path.join(c, "Attention.jpg")
+        if os.path.exists(p):
+            try:
+                with open(p, "rb") as f:
+                    _attention_b64_cache = base64.b64encode(f.read()).decode("utf-8")
+                    return _attention_b64_cache
+            except Exception as e:
+                print(f"[Attention Image] Error reading Attention.jpg: {e}")
+    return None
 
 def get_server_settings_path():
     return os.path.join(os.path.expanduser("~"), Config.SERVER_SETTINGS_FILE)
@@ -192,6 +394,18 @@ class RemoteInputHandler:
         else:
             self.mouse = None
             self.keyboard = None
+        self.pressed_keys = set()
+
+    def release_all_keys(self):
+        """Release all currently pressed keys to avoid stuck keys."""
+        if not self.keyboard:
+            return
+        for key in list(self.pressed_keys):
+            try:
+                self.keyboard.release(key)
+            except Exception:
+                pass
+        self.pressed_keys.clear()
 
     def handle_event(self, event_type, params):
         if not PYNPUT_AVAILABLE or not self.mouse or not self.keyboard:
@@ -244,37 +458,82 @@ class RemoteInputHandler:
                     if dx:
                         ctypes.windll.user32.mouse_event(0x01000, 0, 0, int(dx * 120), 0)
 
+            elif event_type == "release_all":
+                self.release_all_keys()
+
             elif event_type in ("key_press", "key_release"):
                 key_str = params.get("key", "")
                 key_obj = self._parse_key(key_str)
                 if key_obj:
                     if event_type == "key_press":
                         self.keyboard.press(key_obj)
+                        self.pressed_keys.add(key_obj)
                     else:
                         self.keyboard.release(key_obj)
+                        self.pressed_keys.discard(key_obj)
         except Exception as e:
             print(f"[Admin InputHandler Error] {e}")
 
     def _parse_key(self, key_str):
-        if len(key_str) == 1:
+        if not key_str:
+            return None
+        key_lower = key_str.lower()
+        if len(key_str) == 1 and key_lower not in ("\n", "\r", "\t", " "):
             return key_str
+
         special_keys = {
             "space": Key.space,
             "enter": Key.enter,
+            "return": Key.enter,
             "backspace": Key.backspace,
             "tab": Key.tab,
             "esc": Key.esc,
+            "escape": Key.esc,
             "shift": Key.shift,
+            "shift_l": getattr(Key, "shift_l", Key.shift),
+            "shift_r": getattr(Key, "shift_r", Key.shift),
             "ctrl": Key.ctrl,
+            "ctrl_l": getattr(Key, "ctrl_l", Key.ctrl),
+            "ctrl_r": getattr(Key, "ctrl_r", Key.ctrl),
             "alt": Key.alt,
+            "alt_l": getattr(Key, "alt_l", Key.alt),
+            "alt_r": getattr(Key, "alt_r", Key.alt),
+            "alt_gr": getattr(Key, "alt_gr", Key.alt),
             "cmd": Key.cmd,
+            "win": Key.cmd,
+            "windows": Key.cmd,
+            "lwin": getattr(Key, "cmd_l", Key.cmd),
+            "rwin": getattr(Key, "cmd_r", Key.cmd),
             "delete": Key.delete,
             "up": Key.up,
             "down": Key.down,
             "left": Key.left,
-            "right": Key.right
+            "right": Key.right,
+            "home": Key.home,
+            "end": Key.end,
+            "page_up": Key.page_up,
+            "page_down": Key.page_down,
+            "pageup": Key.page_up,
+            "pagedown": Key.page_down,
+            "insert": Key.insert,
+            "caps_lock": Key.caps_lock,
+            "num_lock": Key.num_lock,
+            "print_screen": Key.print_screen,
+            "scroll_lock": Key.scroll_lock,
+            "f1": Key.f1,
+            "f2": Key.f2,
+            "f3": Key.f3,
+            "f4": Key.f4,
+            "f5": Key.f5,
+            "f6": Key.f6,
+            "f7": Key.f7,
+            "f8": Key.f8,
+            "f9": Key.f9,
+            "f10": Key.f10,
+            "f11": Key.f11,
+            "f12": Key.f12,
         }
-        return special_keys.get(key_str.lower(), None)
+        return special_keys.get(key_lower, None)
 
 
 class AdminScreenCapturer(threading.Thread):
@@ -283,17 +542,19 @@ class AdminScreenCapturer(threading.Thread):
         super().__init__(daemon=True)
         self.server_thread = server_thread
         self.running = True
-        self.sct = mss.mss()
-        self.monitor = self.sct.monitors[1]
         self.last_cursor_id = None
+        self.last_cursor_type = None
 
     def stop(self):
         self.running = False
 
     def run(self):
-        fps_counter = 0
+        sct = mss.mss()
+        monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
         last_time = time.time()
+        fps_counter = 0
         current_fps = 10.0
+        frame_idx = 0
 
         while self.running:
             start_t = time.time()
@@ -302,14 +563,17 @@ class AdminScreenCapturer(threading.Thread):
                 continue
 
             try:
-                sct_img = self.sct.grab(self.monitor)
+                frame_idx += 1
+                if frame_idx % 100 == 0 and len(sct.monitors) > 1:
+                    monitor = sct.monitors[1]
+
+                sct_img = sct.grab(monitor)
                 frame_bgra = np.array(sct_img)
                 frame_bgr = cv2.cvtColor(frame_bgra, cv2.COLOR_BGRA2BGR)
                 h, w = frame_bgr.shape[:2]
 
-                quality_preset = Config.DEFAULT_QUALITY_PRESET
-                jpeg_quality = Config.QUALITY_PRESETS[quality_preset]["jpeg_quality"]
-                scale = Config.QUALITY_PRESETS[quality_preset]["scale"]
+                jpeg_quality = Config.QUALITY_PRESETS[Config.DEFAULT_QUALITY_PRESET]["jpeg_quality"]
+                scale = Config.QUALITY_PRESETS[Config.DEFAULT_QUALITY_PRESET]["scale"]
 
                 if scale != 1.0:
                     tw, th = int(w * scale), int(h * scale)
@@ -322,13 +586,16 @@ class AdminScreenCapturer(threading.Thread):
                 if success:
                     frame_bytes = encoded_img.tobytes()
                     cursor_data = None
-                    cid, hx, hy, b64_png = capture_active_cursor()
+                    cid, hx, hy, b64_png, ctype = capture_active_cursor()
                     if cid:
-                        if cid != self.last_cursor_id:
+                        cursor_data = {"id": cid, "hx": hx, "hy": hy}
+                        if ctype:
+                            cursor_data["type"] = ctype
+                        if cid != self.last_cursor_id or ctype != self.last_cursor_type:
                             self.last_cursor_id = cid
-                            cursor_data = {"id": cid, "hx": hx, "hy": hy, "png": b64_png}
-                        else:
-                            cursor_data = {"id": cid, "hx": hx, "hy": hy}
+                            self.last_cursor_type = ctype
+                            if b64_png:
+                                cursor_data["png"] = b64_png
                     self.server_thread.broadcast_admin_frame(frame_bytes, current_fps, w, h, cursor_data=cursor_data)
 
                 fps_counter += 1
@@ -868,13 +1135,21 @@ class StreamCard(QFrame):
         self.stats_badge.setText(f"{fps:.1f} FPS | {status_text}")
         self.stats_badge.adjustSize()
 
-        # Update status dot styling
         new_status = "idle" if is_static else "active"
         if self.status != new_status:
             self.status = new_status
             self.status_dot.setProperty("status", new_status)
             self.status_dot.style().unpolish(self.status_dot)
             self.status_dot.style().polish(self.status_dot)
+
+    def set_active(self):
+        self.status = "active"
+        self.status_dot.setProperty("status", "active")
+        self.status_dot.style().unpolish(self.status_dot)
+        self.status_dot.style().polish(self.status_dot)
+        self.stats_badge.setText("0 FPS | Active")
+        if not self.last_frame_bytes:
+            self.viewport.setText("Waiting for stream...")
 
     def set_offline(self):
         self.status = "offline"
@@ -948,6 +1223,7 @@ class SingleStreamModal(QDialog):
         self.normal_geometry = None
         self.cursor_cache = {}
         self.current_remote_cursor = None
+        self.kb_hook = WindowsKeyboardHook(self._on_hook_key_event) if WindowsKeyboardHook else None
 
         self.setWindowTitle(f"Live Stream - {self.info.get('name')} ({self.info.get('ip')})")
         
@@ -970,6 +1246,30 @@ class SingleStreamModal(QDialog):
 
         self.init_ui()
         self.installEventFilter(self)
+
+    def _on_hook_key_event(self, key_str, is_down):
+        """Called by WindowsKeyboardHook when a system shortcut (Alt+Tab, Win, Alt+F4) is intercepted."""
+        if not self.remote_control_enabled:
+            return
+        event_name = "key_press" if is_down else "key_release"
+        pkt = Protocol.create_remote_input_packet(event_name, {"key": key_str})
+        self.server_thread.send_to_client(self.client_id, pkt)
+
+    def closeEvent(self, event):
+        if self.kb_hook:
+            self.kb_hook.uninstall()
+        if self.remote_control_enabled:
+            pkt = Protocol.create_remote_input_packet("release_all", {})
+            self.server_thread.send_to_client(self.client_id, pkt)
+        super().closeEvent(event)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.ActivationChange:
+            if not self.isActiveWindow() and self.remote_control_enabled:
+                # Release keys if window loses focus to avoid stuck modifiers
+                pkt = Protocol.create_remote_input_packet("release_all", {})
+                self.server_thread.send_to_client(self.client_id, pkt)
+        super().changeEvent(event)
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1027,10 +1327,10 @@ class SingleStreamModal(QDialog):
         self.share_btn.clicked.connect(self.open_share_dialog)
         bar_layout.addWidget(self.share_btn)
 
-        # Ping Alert Button
-        self.alert_btn = QPushButton("🚨 Ping Alert", self)
+        # Alert User Button
+        self.alert_btn = QPushButton("🚨 Alert This User", self)
         self.alert_btn.setProperty("class", "GlassButton")
-        self.alert_btn.clicked.connect(self.ping_alert)
+        self.alert_btn.clicked.connect(self.alert_this_user)
         bar_layout.addWidget(self.alert_btn)
 
         # Screenshot Button
@@ -1083,25 +1383,29 @@ class SingleStreamModal(QDialog):
         fps = metadata.get("fps", 0)
         self.stats_lbl.setText(f"{fps:.1f} FPS | Res: {self.last_frame_size[0]}x{self.last_frame_size[1]}")
 
-        # Update remote cursor for Photoshop / design tools
+        # Update remote cursor for typing, resizing, busy/wait, Photoshop / design tools
         cursor_info = metadata.get("cursor")
         if cursor_info:
-            cid = cursor_info.get("id")
-            hx = cursor_info.get("hx", 0)
-            hy = cursor_info.get("hy", 0)
-            png_b64 = cursor_info.get("png")
-            if png_b64:
-                try:
-                    png_data = base64.b64decode(png_b64)
-                    qimg = QImage.fromData(png_data)
-                    qpix = QPixmap.fromImage(qimg)
-                    qcur = QCursor(qpix, hx, hy)
-                    self.cursor_cache[cid] = qcur
-                    self.current_remote_cursor = qcur
-                except Exception:
-                    pass
-            elif cid in self.cursor_cache:
-                self.current_remote_cursor = self.cursor_cache[cid]
+            ctype = cursor_info.get("type")
+            if ctype and ctype in CURSOR_SHAPE_MAP:
+                self.current_remote_cursor = CURSOR_SHAPE_MAP[ctype]
+            else:
+                cid = cursor_info.get("id")
+                hx = cursor_info.get("hx", 0)
+                hy = cursor_info.get("hy", 0)
+                png_b64 = cursor_info.get("png")
+                if png_b64:
+                    try:
+                        png_data = base64.b64decode(png_b64)
+                        qimg = QImage.fromData(png_data)
+                        qpix = QPixmap.fromImage(qimg)
+                        qcur = QCursor(qpix, hx, hy)
+                        self.cursor_cache[cid] = qcur
+                        self.current_remote_cursor = qcur
+                    except Exception:
+                        pass
+                elif cid in self.cursor_cache:
+                    self.current_remote_cursor = self.cursor_cache[cid]
 
             if self.remote_control_enabled and self.current_remote_cursor:
                 self.viewport.setCursor(self.current_remote_cursor)
@@ -1124,16 +1428,25 @@ class SingleStreamModal(QDialog):
             self.viewport.setFocus()
             if self.current_remote_cursor:
                 self.viewport.setCursor(self.current_remote_cursor)
+            if self.kb_hook:
+                self.kb_hook.set_target_hwnd(int(self.winId()))
+                self.kb_hook.install()
         else:
             self.rc_btn.setText("🎮 Remote Control: OFF")
             self.rc_btn.setStyleSheet("")
             self.viewport.setCursor(Qt.CursorShape.ArrowCursor)
             self.viewport.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            if self.kb_hook:
+                self.kb_hook.uninstall()
+            pkt = Protocol.create_remote_input_packet("release_all", {})
+            self.server_thread.send_to_client(self.client_id, pkt)
 
-    def ping_alert(self):
-        pkt = Protocol.create_alert_packet()
+    def alert_this_user(self):
+        pkt = Protocol.create_alert_packet(image_b64=get_attention_image_b64())
         self.server_thread.send_to_client(self.client_id, pkt)
-        QMessageBox.information(self, "Ping Alert", f"Alert sent to {self.info.get('name')}.")
+        QMessageBox.information(self, "Alert Sent", f"Attention alert popup sent to {self.info.get('name', 'User')}.")
+
+    ping_alert = alert_this_user
 
     def take_screenshot(self):
         if not self.viewport.pixmap():
@@ -1289,7 +1602,28 @@ class SingleStreamModal(QDialog):
             Qt.Key.Key_Down: "down",
             Qt.Key.Key_Left: "left",
             Qt.Key.Key_Right: "right",
-            Qt.Key.Key_Delete: "delete"
+            Qt.Key.Key_Delete: "delete",
+            Qt.Key.Key_Home: "home",
+            Qt.Key.Key_End: "end",
+            Qt.Key.Key_PageUp: "page_up",
+            Qt.Key.Key_PageDown: "page_down",
+            Qt.Key.Key_Insert: "insert",
+            Qt.Key.Key_CapsLock: "caps_lock",
+            Qt.Key.Key_NumLock: "num_lock",
+            Qt.Key.Key_ScrollLock: "scroll_lock",
+            Qt.Key.Key_Print: "print_screen",
+            Qt.Key.Key_F1: "f1",
+            Qt.Key.Key_F2: "f2",
+            Qt.Key.Key_F3: "f3",
+            Qt.Key.Key_F4: "f4",
+            Qt.Key.Key_F5: "f5",
+            Qt.Key.Key_F6: "f6",
+            Qt.Key.Key_F7: "f7",
+            Qt.Key.Key_F8: "f8",
+            Qt.Key.Key_F9: "f9",
+            Qt.Key.Key_F10: "f10",
+            Qt.Key.Key_F11: "f11",
+            Qt.Key.Key_F12: "f12",
         }
         
         if qt_key in special_keys:
@@ -1447,7 +1781,7 @@ class SettingsDialog(QDialog):
     def __init__(self, current_port, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Application Configuration")
-        self.setFixedSize(400, 300)
+        self.setFixedSize(420, 360)
         self.setStyleSheet("background-color: #0F172A; color: #F8FAFC;")
 
         layout = QVBoxLayout(self)
@@ -1474,6 +1808,21 @@ class SettingsDialog(QDialog):
         form.addRow("Admin Password:", self.pass_edit)
 
         layout.addLayout(form)
+        layout.addSpacing(8)
+
+        # Software Maintenance & License
+        actions_box = QHBoxLayout()
+        check_update_btn = QPushButton("⚡ Check for Updates", self)
+        check_update_btn.setStyleSheet("background: #1E293B; color: #38BDF8; border: 1px solid #0284C7; padding: 6px 12px; border-radius: 6px; font-weight: bold;")
+        check_update_btn.clicked.connect(lambda: manual_check_for_updates(self))
+        actions_box.addWidget(check_update_btn)
+
+        license_btn = QPushButton("📜 View License", self)
+        license_btn.setStyleSheet("background: #1E293B; color: #94A3B8; border: 1px solid #475569; padding: 6px 12px; border-radius: 6px; font-weight: bold;")
+        license_btn.clicked.connect(lambda: show_license_dialog(self))
+        actions_box.addWidget(license_btn)
+
+        layout.addLayout(actions_box)
         layout.addStretch()
 
         btn_box = QHBoxLayout()
@@ -1685,6 +2034,11 @@ class MasterDashboardWindow(QMainWindow):
         self.admin_capturer = AdminScreenCapturer(self.server_thread)
         self.admin_capturer.start()
 
+        # Daily silent update check
+        self.update_bridge = get_update_bridge()
+        self.update_bridge.update_found.connect(lambda rel: prompt_and_install_update(self, rel))
+        start_silent_daily_update_check()
+
     def load_stylesheet(self):
         # Try multiple locations: PyInstaller bundle, cx_Freeze exe dir, script dir
         candidates = [
@@ -1856,9 +2210,9 @@ class MasterDashboardWindow(QMainWindow):
         sb_layout.addWidget(btn_bandwidth)
         self.sidebar_buttons.append(btn_bandwidth)
 
-        btn_alert = QPushButton("  🚨 Ping All Clients", sidebar)
+        btn_alert = QPushButton("  🚨 Alert All Users", sidebar)
         btn_alert.setObjectName("SidebarButton")
-        btn_alert.clicked.connect(lambda: (self._set_active_sidebar(btn_alert), self.ping_all_clients()))
+        btn_alert.clicked.connect(lambda: (self._set_active_sidebar(btn_alert), self.alert_all_users()))
         sb_layout.addWidget(btn_alert)
         self.sidebar_buttons.append(btn_alert)
 
@@ -2035,6 +2389,8 @@ class MasterDashboardWindow(QMainWindow):
     def on_client_connected(self, client_id, info):
         if client_id in self.cards:
             card = self.cards[client_id]
+            card.info = info
+            card.set_active()
         else:
             card = StreamCard(client_id=client_id, info=info, parent=self.grid_container)
             card.expand_requested.connect(self.open_single_view_modal)
@@ -2042,6 +2398,9 @@ class MasterDashboardWindow(QMainWindow):
             card.swap_requested.connect(self.swap_cards)
             self.cards[client_id] = card
             self.rearrange_grid()
+
+        self.update_header_stats()
+        self.update_share_indicators()
 
     def swap_cards(self, source_id, target_id):
         items = list(self.cards.items())
@@ -2064,14 +2423,20 @@ class MasterDashboardWindow(QMainWindow):
 
     def on_frame_received(self, client_id, frame_bytes, metadata):
         if client_id in self.cards:
-            self.cards[client_id].update_frame(frame_bytes, metadata)
+            card = self.cards[client_id]
+            if card.status == "offline":
+                card.set_active()
+                self.update_header_stats()
+            card.update_frame(frame_bytes, metadata)
 
         # Update modal stream if active
         if self.active_modal and self.active_modal.client_id == client_id:
             self.active_modal.update_frame(frame_bytes, metadata)
 
     def update_header_stats(self):
-        active_count = sum(1 for c in self.cards.values() if c.status != "offline")
+        server_active = len(self.server_thread.active_clients) if hasattr(self, 'server_thread') and self.server_thread else 0
+        card_active = sum(1 for c in self.cards.values() if c.status != "offline")
+        active_count = max(server_active, card_active)
         self.badge_connected.setText(f"Connected: {active_count} PCs")
 
     def open_single_view_modal(self, client_id):
@@ -2251,10 +2616,12 @@ class MasterDashboardWindow(QMainWindow):
                 "Application settings saved.\n\nNote: If you changed the server port, please restart Overwatch Master Dashboard for the new port to take effect."
             )
 
-    def ping_all_clients(self):
-        pkt = Protocol.create_alert_packet()
+    def alert_all_users(self):
+        pkt = Protocol.create_alert_packet(image_b64=get_attention_image_b64())
         self.server_thread.broadcast(pkt)
-        QMessageBox.information(self, "Ping Alert Sent", "Flashing screen border alert sent to all connected client screens!")
+        QMessageBox.information(self, "Alert Sent", "Attention alert popup sent to all connected client screens!")
+
+    ping_all_clients = alert_all_users
 
     def closeEvent(self, event):
         if hasattr(self, 'admin_capturer') and self.admin_capturer:
@@ -2321,15 +2688,23 @@ def ensure_firewall_rule():
         print(f"[Firewall] Error creating rule: {e}")
 
 
-def main():
+def main(instance_controller=None):
     try:
         if sys.platform == "win32":
             import ctypes
-            myappid = "blackbox.overwatch.lanmonitor.4_6_1"
+            myappid = "blackbox.overwatch.lanmonitor.4_7_0"
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
         load_server_settings()
-        app = QApplication(sys.argv)
+        app = QApplication.instance()
+        if not app:
+            app = QApplication(sys.argv)
+
+        if instance_controller is None:
+            instance_controller = SingleInstanceController()
+            if instance_controller.is_already_running():
+                print("[Master] Another Overwatch instance is already running. Exiting.")
+                sys.exit(0)
 
         bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
         icon_path = os.path.join(bundle_dir, "app_icon.ico")
@@ -2339,6 +2714,16 @@ def main():
         ensure_firewall_rule()
         window = MasterDashboardWindow()
         window.show()
+
+        if instance_controller:
+            def handle_activate(_msg):
+                window.showNormal()
+                window.raise_()
+                window.activateWindow()
+                bring_window_to_front(window, momentary_topmost=True)
+
+            instance_controller.activated.connect(handle_activate)
+
         sys.exit(app.exec())
     except Exception:
         # Log crash to file next to the executable for debugging

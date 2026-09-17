@@ -5,7 +5,12 @@ class Config:
     # Application Branding & Metadata
     APP_NAME = "Overwatch"
     APP_TITLE = "Overwatch - LAN Live Screen Monitor"
-    VERSION = "4.6.1"
+    VERSION = "4.7.0"
+    
+    # GitHub Repository & Auto-Update Configuration
+    GITHUB_REPO = "jimhpar/OverWatch_Lan_Remote"
+    GITHUB_RELEASES_API = "https://api.github.com/repos/jimhpar/OverWatch_Lan_Remote/releases/latest"
+    UPDATE_CHECK_INTERVAL_HOURS = 24
 
     # Network Server Configuration
     DEFAULT_HOST = "0.0.0.0"

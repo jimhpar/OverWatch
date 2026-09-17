@@ -23,6 +23,10 @@ build_exe_options = {
         "protocol.py",
         "master_dashboard.py",
         "employee_client.py",
+        "updater.py",
+        "single_instance.py",
+        "Attention.jpg",
+        "LICENSE",
         "logo",
     ],
     "excludes": ["tkinter", "unittest"],
@@ -91,6 +95,7 @@ bdist_msi_options = {
     "all_users": True,
     "initial_target_dir": r"[ProgramFiles64Folder]\Overwatch",
     "install_icon": "app_icon.ico",
+    "upgrade_code": "{7A82987E-127E-4E76-A833-89945D081977}",
     "directories": msi_directories,
     "data": msi_data,
 }
@@ -107,8 +112,8 @@ executables = [
 
 setup(
     name="Overwatch",
-    version="4.6.1",
-    description="Overwatch LAN Live Screen Monitoring System v4.6.1",
+    version="4.7.0",
+    description="Overwatch LAN Live Screen Monitoring System v4.7.0",
     author="Blackbox THC",
     author_email="",
     options={

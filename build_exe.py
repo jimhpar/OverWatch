@@ -36,6 +36,10 @@ def build_executable():
         "--add-data=protocol.py;.",
         "--add-data=master_dashboard.py;.",
         "--add-data=employee_client.py;.",
+        "--add-data=updater.py;.",
+        "--add-data=single_instance.py;.",
+        "--add-data=Attention.jpg;.",
+        "--add-data=LICENSE;.",
         "--add-data=logo;logo",
         "--hidden-import=websockets",
         "--hidden-import=websockets.exceptions",
@@ -47,6 +51,8 @@ def build_executable():
         "--hidden-import=pynput.keyboard",
         "--hidden-import=master_dashboard",
         "--hidden-import=employee_client",
+        "--hidden-import=updater",
+        "--hidden-import=single_instance",
         "launcher.py"
     ]
     subprocess.run(cmd, check=True)
