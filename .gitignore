@@ -23,3 +23,9 @@ crash_log.txt
 .venv
 env/
 venv/
+
+# Flutter Mobile / TV App
+overwatch_app/build/
+overwatch_app/.dart_tool/
+overwatch_app/.flutter-plugins
+overwatch_app/.flutter-plugins-dependencies
