@@ -1335,6 +1335,39 @@ class SingleStreamModal(QDialog):
         self.rc_btn.clicked.connect(self.toggle_remote_control)
         bar_layout.addWidget(self.rc_btn)
 
+        # Android Navigation Controls (Back, Home, Recents, Notifications)
+        self.nav_frame = QFrame(self)
+        self.nav_frame.setObjectName("AndroidNavFrame")
+        nav_layout = QHBoxLayout(self.nav_frame)
+        nav_layout.setContentsMargins(4, 2, 4, 2)
+        nav_layout.setSpacing(6)
+
+        self.btn_back = QPushButton("◀ Back", self)
+        self.btn_back.setToolTip("Android Back (Esc)")
+        self.btn_back.setStyleSheet("background-color: rgba(255, 255, 255, 0.12); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px; padding: 4px 10px; color: #FFF; font-weight: bold;")
+        self.btn_back.clicked.connect(lambda: self.send_global_action("back"))
+        nav_layout.addWidget(self.btn_back)
+
+        self.btn_home = QPushButton("⌂ Home", self)
+        self.btn_home.setToolTip("Android Home (Win/Home)")
+        self.btn_home.setStyleSheet("background-color: rgba(255, 255, 255, 0.12); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px; padding: 4px 10px; color: #FFF; font-weight: bold;")
+        self.btn_home.clicked.connect(lambda: self.send_global_action("home"))
+        nav_layout.addWidget(self.btn_home)
+
+        self.btn_recents = QPushButton("▢ Recents", self)
+        self.btn_recents.setToolTip("Android Recents / Multitasking (F2)")
+        self.btn_recents.setStyleSheet("background-color: rgba(255, 255, 255, 0.12); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px; padding: 4px 10px; color: #FFF; font-weight: bold;")
+        self.btn_recents.clicked.connect(lambda: self.send_global_action("recents"))
+        nav_layout.addWidget(self.btn_recents)
+
+        self.btn_notif = QPushButton("🔔 Shade", self)
+        self.btn_notif.setToolTip("Pull Down Notifications Shade")
+        self.btn_notif.setStyleSheet("background-color: rgba(255, 255, 255, 0.12); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px; padding: 4px 10px; color: #FFF; font-weight: bold;")
+        self.btn_notif.clicked.connect(lambda: self.send_global_action("notifications"))
+        nav_layout.addWidget(self.btn_notif)
+
+        bar_layout.addWidget(self.nav_frame)
+
         # Share Screen Button
         self.share_btn = QPushButton("↗ Share Screen", self)
         self.share_btn.setProperty("class", "GlassButton")
@@ -1369,6 +1402,10 @@ class SingleStreamModal(QDialog):
 
         # Position Floating Bar over bottom of viewport
         main_layout.addWidget(self.action_bar, alignment=Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+
+    def send_global_action(self, action_name):
+        pkt = Protocol.create_remote_input_packet("global_action", {"action": action_name})
+        self.server_thread.send_to_client(self.client_id, pkt)
 
     def open_share_dialog(self):
         if self.parent() and hasattr(self.parent(), 'open_share_client_dialog'):
@@ -1613,6 +1650,18 @@ class SingleStreamModal(QDialog):
 
     def _dispatch_key_event(self, event):
         qt_key = event.key()
+
+        # Android Gesture Hotkeys: Esc -> Back, Home -> Home, F2 -> Recents
+        if qt_key == Qt.Key.Key_Escape and event.type() == QEvent.Type.KeyPress:
+            self.send_global_action("back")
+            return
+        elif qt_key == Qt.Key.Key_Home and event.type() == QEvent.Type.KeyPress:
+            self.send_global_action("home")
+            return
+        elif qt_key == Qt.Key.Key_F2 and event.type() == QEvent.Type.KeyPress:
+            self.send_global_action("recents")
+            return
+
         key_str = ""
         
         special_keys = {

@@ -27,8 +27,16 @@ class MainActivity : FlutterActivity() {
     }
 
     private var pendingCaptureResult: MethodChannel.Result? = null
-    private var lastTouchX = 0f
-    private var lastTouchY = 0f
+
+    // Touch gesture tracking state to cleanly separate Click from Drag/Swipe
+    private var isMouseDown = false
+    private var isDragging = false
+    private var touchDownX = 0f
+    private var touchDownY = 0f
+    private var touchDownTime = 0L
+    private var currentTouchX = 0f
+    private var currentTouchY = 0f
+    private var touchButton = "left"
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -119,10 +127,6 @@ class MainActivity : FlutterActivity() {
                         when (eventType) {
                             "mouse_click" -> {
                                 val pressed = (params["pressed"] as? Boolean) ?: true
-                                if (!pressed) {
-                                    result.success(true)
-                                    return@setMethodCallHandler
-                                }
                                 val normX = (params["x"] as? Number)?.toFloat() ?: 0.5f
                                 val normY = (params["y"] as? Number)?.toFloat() ?: 0.5f
                                 val button = params["button"] as? String ?: "left"
@@ -130,26 +134,75 @@ class MainActivity : FlutterActivity() {
                                 val absX = (normX * screenW).coerceIn(0f, screenW)
                                 val absY = (normY * screenH).coerceIn(0f, screenH)
 
-                                val ok = if (button == "right") {
-                                    OverwatchAccessibilityService.dispatchLongClick(absX, absY)
+                                if (pressed) {
+                                    // Touch DOWN: start tracking gesture, DO NOT tap immediately
+                                    isMouseDown = true
+                                    isDragging = false
+                                    touchDownX = absX
+                                    touchDownY = absY
+                                    currentTouchX = absX
+                                    currentTouchY = absY
+                                    touchDownTime = System.currentTimeMillis()
+                                    touchButton = button
+                                    result.success(true)
                                 } else {
-                                    OverwatchAccessibilityService.dispatchClick(absX, absY)
+                                    // Touch UP: evaluate whether it was a TAP or a SWIPE/DRAG
+                                    isMouseDown = false
+                                    val duration = (System.currentTimeMillis() - touchDownTime).coerceAtLeast(30)
+                                    val ok = if (!isDragging) {
+                                        // User clicked and released without dragging!
+                                        if (touchButton == "right" || duration > 450) {
+                                            OverwatchAccessibilityService.dispatchLongClick(touchDownX, touchDownY)
+                                        } else {
+                                            OverwatchAccessibilityService.dispatchClick(touchDownX, touchDownY)
+                                        }
+                                    } else {
+                                        // User dragged! Execute swipe gesture smoothly
+                                        OverwatchAccessibilityService.dispatchSwipe(touchDownX, touchDownY, absX, absY, duration.coerceIn(80, 400))
+                                    }
+                                    result.success(ok)
                                 }
-                                result.success(ok)
                             }
                             "mouse_move" -> {
                                 val normX = (params["x"] as? Number)?.toFloat() ?: 0.5f
                                 val normY = (params["y"] as? Number)?.toFloat() ?: 0.5f
-                                lastTouchX = (normX * screenW).coerceIn(0f, screenW)
-                                lastTouchY = (normY * screenH).coerceIn(0f, screenH)
+                                val absX = (normX * screenW).coerceIn(0f, screenW)
+                                val absY = (normY * screenH).coerceIn(0f, screenH)
+
+                                currentTouchX = absX
+                                currentTouchY = absY
+
+                                if (isMouseDown) {
+                                    val dist = Math.hypot((absX - touchDownX).toDouble(), (absY - touchDownY).toDouble()).toFloat()
+                                    // If moved more than 20 pixels, classify as a drag gesture
+                                    if (dist > 20f) {
+                                        isDragging = true
+                                    }
+                                }
                                 result.success(true)
                             }
                             "mouse_scroll" -> {
+                                val normX = (params["x"] as? Number)?.toFloat() ?: 0.5f
+                                val normY = (params["y"] as? Number)?.toFloat() ?: 0.5f
+                                val curX = (normX * screenW).coerceIn(0f, screenW)
+                                val curY = (normY * screenH).coerceIn(0f, screenH)
+
                                 val deltaY = (params["dy"] as? Number)?.toFloat() ?: 0f
-                                val endY = (lastTouchY - deltaY * 150f).coerceIn(0f, screenH)
-                                val ok = OverwatchAccessibilityService.dispatchSwipe(lastTouchX, lastTouchY, lastTouchX, endY, 150)
-                                lastTouchY = endY
-                                result.success(ok)
+                                if (deltaY != 0f) {
+                                    // Natural mobile scroll:
+                                    // Rolling wheel DOWN (deltaY < 0) means content moves down (finger swipes UP)
+                                    // Rolling wheel UP (deltaY > 0) means content moves up (finger swipes DOWN)
+                                    val swipeDistance = 450f
+                                    val endY = if (deltaY < 0) {
+                                        (curY - swipeDistance).coerceIn(50f, screenH - 50f)
+                                    } else {
+                                        (curY + swipeDistance).coerceIn(50f, screenH - 50f)
+                                    }
+                                    val ok = OverwatchAccessibilityService.dispatchSwipe(curX, curY, curX, endY, 160)
+                                    result.success(ok)
+                                } else {
+                                    result.success(true)
+                                }
                             }
                             "key_press" -> {
                                 val key = params["key"] as? String ?: ""
@@ -162,9 +215,10 @@ class MainActivity : FlutterActivity() {
                             }
                             "global_action" -> {
                                 val actionStr = params["action"] as? String ?: "back"
-                                val actionCode = when (actionStr) {
+                                val actionCode = when (actionStr.lowercase()) {
                                     "home" -> AccessibilityService.GLOBAL_ACTION_HOME
                                     "recents" -> AccessibilityService.GLOBAL_ACTION_RECENTS
+                                    "notifications" -> AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS
                                     else -> AccessibilityService.GLOBAL_ACTION_BACK
                                 }
                                 val ok = OverwatchAccessibilityService.performGlobal(actionCode)
