@@ -39,6 +39,54 @@ class NativeScreenCapture {
     } catch (_) {}
   }
 
+  static Future<bool> isDeviceAdminActive() async {
+    try {
+      final res = await _methodChannel.invokeMethod<bool>('isDeviceAdminActive');
+      return res == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> requestDeviceAdmin() async {
+    try {
+      await _methodChannel.invokeMethod('requestDeviceAdmin');
+    } catch (_) {}
+  }
+
+  static Future<void> deactivateDeviceAdmin() async {
+    try {
+      await _methodChannel.invokeMethod('deactivateDeviceAdmin');
+    } catch (_) {}
+  }
+
+  static Future<bool> isAccessibilityActive() async {
+    try {
+      final res = await _methodChannel.invokeMethod<bool>('isAccessibilityActive');
+      return res == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> openAccessibilitySettings() async {
+    try {
+      await _methodChannel.invokeMethod('openAccessibilitySettings');
+    } catch (_) {}
+  }
+
+  static Future<bool> injectRemoteInput(String eventType, Map<String, dynamic> params) async {
+    try {
+      final res = await _methodChannel.invokeMethod<bool>('injectRemoteInput', {
+        'event_type': eventType,
+        'params': params,
+      });
+      return res == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static Stream<Map<String, dynamic>> get frameStream {
     _frameStream ??= _eventChannel
         .receiveBroadcastStream()

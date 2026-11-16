@@ -16,19 +16,42 @@ class ClientScreen extends StatefulWidget {
   State<ClientScreen> createState() => _ClientScreenState();
 }
 
-class _ClientScreenState extends State<ClientScreen> {
+class _ClientScreenState extends State<ClientScreen> with WidgetsBindingObserver {
   bool _isStreaming = false;
   StreamSubscription? _frameSubscription;
   bool _hasAutoStarted = false;
   int _sentFrameCount = 0;
 
+  bool _isA11yActive = false;
+  bool _isDeviceAdmin = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initConnection();
       _listenToNativeFrames();
+      _checkPermissions();
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkPermissions();
+    }
+  }
+
+  Future<void> _checkPermissions() async {
+    final a11y = await NativeScreenCapture.isAccessibilityActive();
+    final admin = await NativeScreenCapture.isDeviceAdminActive();
+    if (mounted) {
+      setState(() {
+        _isA11yActive = a11y;
+        _isDeviceAdmin = admin;
+      });
+    }
   }
 
   void _initConnection() {
@@ -82,7 +105,6 @@ class _ClientScreenState extends State<ClientScreen> {
       setState(() {
         _isStreaming = true;
       });
-      // Also request battery exemption so the app never gets killed in background
       await NativeScreenCapture.requestBatteryExemption();
     }
   }
@@ -98,6 +120,7 @@ class _ClientScreenState extends State<ClientScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _frameSubscription?.cancel();
     super.dispose();
   }
@@ -245,7 +268,7 @@ class _ClientScreenState extends State<ClientScreen> {
                         ],
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 16),
 
                     // Device Info Details
                     GlassCard(
@@ -272,30 +295,56 @@ class _ClientScreenState extends State<ClientScreen> {
                         ],
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 16),
 
-                    // Battery / Background Persistence Action Card
+                    // Remote Control Accessibility Card
                     GlassCard(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      borderColor: AppConstants.accentOrange.withValues(alpha: 0.3),
+                      borderColor: _isA11yActive
+                          ? AppConstants.accentGreen.withValues(alpha: 0.3)
+                          : AppConstants.accentOrange.withValues(alpha: 0.3),
                       child: Row(
                         children: [
-                          const Icon(Icons.battery_saver, color: AppConstants.accentOrange, size: 24),
+                          Icon(
+                            Icons.touch_app,
+                            color: _isA11yActive ? AppConstants.accentGreen : AppConstants.accentOrange,
+                            size: 24,
+                          ),
                           const SizedBox(width: 12),
-                          const Expanded(
+                          Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
-                                  'Background Persistence',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  ),
+                                Row(
+                                  children: [
+                                    const Text(
+                                      'Remote Control',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: (_isA11yActive ? AppConstants.accentGreen : AppConstants.accentOrange).withValues(alpha: 0.2),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(
+                                        _isA11yActive ? 'Active' : 'Disabled',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                          color: _isA11yActive ? AppConstants.accentGreen : AppConstants.accentOrange,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                Text(
-                                  'Prevent OS from killing screen stream in background',
+                                const Text(
+                                  'Allows master PC to click and control this device',
                                   style: TextStyle(
                                     fontSize: 11,
                                     color: AppConstants.textMuted,
@@ -304,23 +353,81 @@ class _ClientScreenState extends State<ClientScreen> {
                               ],
                             ),
                           ),
-                          TextButton(
-                            style: TextButton.styleFrom(
-                              foregroundColor: AppConstants.accentOrange,
-                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                          if (!_isA11yActive)
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                foregroundColor: AppConstants.accentOrange,
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                              ),
+                              onPressed: () async {
+                                await NativeScreenCapture.openAccessibilitySettings();
+                              },
+                              child: const Text('Enable', style: TextStyle(fontWeight: FontWeight.bold)),
                             ),
-                            onPressed: () async {
-                              await NativeScreenCapture.requestBatteryExemption();
-                              if (context.mounted) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Battery optimization exemption requested'),
-                                    behavior: SnackBarBehavior.floating,
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Device Admin Protection Card (Optional by user)
+                    GlassCard(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      borderColor: _isDeviceAdmin
+                          ? AppConstants.accentBlue.withValues(alpha: 0.3)
+                          : AppConstants.cardBorderColor,
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.security,
+                            color: _isDeviceAdmin ? AppConstants.accentBlue : AppConstants.textMuted,
+                            size: 24,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Text(
+                                      'Device Admin Shield',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '(Optional)',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: AppConstants.textMuted.withValues(alpha: 0.8),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const Text(
+                                  'Prevents accidental uninstall and background process termination',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: AppConstants.textMuted,
                                   ),
-                                );
+                                ),
+                              ],
+                            ),
+                          ),
+                          Switch(
+                            value: _isDeviceAdmin,
+                            activeThumbColor: AppConstants.accentBlue,
+                            onChanged: (val) async {
+                              if (val) {
+                                await NativeScreenCapture.requestDeviceAdmin();
+                              } else {
+                                await NativeScreenCapture.deactivateDeviceAdmin();
                               }
+                              await _checkPermissions();
                             },
-                            child: const Text('Enable', style: TextStyle(fontWeight: FontWeight.bold)),
                           ),
                         ],
                       ),

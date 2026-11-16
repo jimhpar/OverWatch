@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../protocol/packets.dart';
+import 'native_screen_capture.dart';
 
 enum ConnectionStatus {
   disconnected,
@@ -131,6 +132,10 @@ class ConnectionService extends ChangeNotifier {
           _cleanupSocket();
         }
         notifyListeners();
+      } else if (type == PacketType.remoteInput) {
+        final eventType = json['event_type'] as String? ?? '';
+        final params = json['params'] as Map<String, dynamic>? ?? {};
+        NativeScreenCapture.injectRemoteInput(eventType, params);
       } else if (type == PacketType.frameData) {
         final frame = FramePacket.fromJson(json);
         if (!_clients.containsKey(frame.clientId)) {

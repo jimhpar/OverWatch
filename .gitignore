@@ -13,6 +13,7 @@ dist/
 *.msi
 *.exe
 *.dmg
+*.apk
 
 # System logs
 crash_log.txt
@@ -23,6 +24,7 @@ crash_log.txt
 .venv
 env/
 venv/
+.vscode/
 
 # Flutter Mobile / TV App
 overwatch_app/build/
