@@ -66,13 +66,25 @@ class _ClientScreenState extends State<ClientScreen> with WidgetsBindingObserver
     );
   }
 
+  int _frameCounter = 0;
+  int _lastFpsCalcTime = DateTime.now().millisecondsSinceEpoch;
+  double _measuredFps = 22.0;
+
   void _listenToNativeFrames() {
     _frameSubscription?.cancel();
     _frameSubscription = NativeScreenCapture.frameStream.listen(
       (data) {
         final frameBytes = data['frame'] as Uint8List?;
-        final width = data['width'] as int? ?? 720;
-        final height = data['height'] as int? ?? 1280;
+        final width = data['width'] as int? ?? 540;
+        final height = data['height'] as int? ?? 1200;
+
+        _frameCounter++;
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (now - _lastFpsCalcTime >= 1000) {
+          _measuredFps = (_frameCounter * 1000.0) / (now - _lastFpsCalcTime);
+          _frameCounter = 0;
+          _lastFpsCalcTime = now;
+        }
 
         if (frameBytes != null && mounted) {
           final conn = Provider.of<ConnectionService>(context, listen: false);
@@ -81,7 +93,7 @@ class _ClientScreenState extends State<ClientScreen> with WidgetsBindingObserver
           if (conn.status == ConnectionStatus.authenticated) {
             conn.sendFrameData(
               frameBytes: frameBytes,
-              fps: 11.0,
+              fps: _measuredFps,
               width: width,
               height: height,
               clientId: rm.deviceName,

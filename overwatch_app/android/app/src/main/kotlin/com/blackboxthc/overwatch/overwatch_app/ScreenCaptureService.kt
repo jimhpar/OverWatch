@@ -47,13 +47,18 @@ class ScreenCaptureService : Service() {
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
 
-    private var targetWidth = 720
-    private var targetHeight = 1280
+    private var targetWidth = 540
+    private var targetHeight = 1200
     private var screenDpi = 320
 
     private var lastFrameTime = 0L
-    private val frameIntervalMs = 90L // ~11 FPS (ultra-low CPU & network consumption)
+    private val frameIntervalMs = 45L // ~22-25 FPS (Smooth real-time video)
     private var isScreenLocked = false
+
+    // Reusable buffers to completely eliminate Android Garbage Collector (GC) jank & memory churn
+    private var reusableRawBitmap: Bitmap? = null
+    private var reusableCroppedBitmap: Bitmap? = null
+    private val reusableOutputStream = ByteArrayOutputStream(64 * 1024)
 
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -175,9 +180,9 @@ class ScreenCaptureService : Service() {
         realScreenHeight = metrics.heightPixels
         screenDpi = metrics.densityDpi
 
-        // Downscale to 720p width maintaining exact aspect ratio for fast JPEG encoding
-        val scale = 720f / realScreenWidth.toFloat()
-        targetWidth = 720
+        // Downscale to 540p width maintaining exact aspect ratio for ultra-fast, smooth 25 FPS encoding
+        val scale = 540f / realScreenWidth.toFloat()
+        targetWidth = 540
         targetHeight = ((realScreenHeight * scale).toInt() / 2) * 2
 
         val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -234,30 +239,31 @@ class ScreenCaptureService : Service() {
                 val pixelStride = planes[0].pixelStride
                 val rowStride = planes[0].rowStride
                 val rowPadding = rowStride - pixelStride * targetWidth
+                val rawWidth = targetWidth + rowPadding / pixelStride
 
-                val bitmap = Bitmap.createBitmap(
-                    targetWidth + rowPadding / pixelStride,
-                    targetHeight,
-                    Bitmap.Config.ARGB_8888
-                )
-                bitmap.copyPixelsFromBuffer(buffer)
+                if (reusableRawBitmap == null || reusableRawBitmap?.width != rawWidth || reusableRawBitmap?.height != targetHeight) {
+                    reusableRawBitmap?.recycle()
+                    reusableRawBitmap = Bitmap.createBitmap(rawWidth, targetHeight, Bitmap.Config.ARGB_8888)
+                }
+                reusableRawBitmap!!.copyPixelsFromBuffer(buffer)
 
                 val finalBitmap = if (rowPadding != 0) {
-                    Bitmap.createBitmap(bitmap, 0, 0, targetWidth, targetHeight)
+                    if (reusableCroppedBitmap == null || reusableCroppedBitmap?.width != targetWidth || reusableCroppedBitmap?.height != targetHeight) {
+                        reusableCroppedBitmap?.recycle()
+                        reusableCroppedBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+                    }
+                    val canvas = android.graphics.Canvas(reusableCroppedBitmap!!)
+                    canvas.drawBitmap(reusableRawBitmap!!, 0f, 0f, null)
+                    reusableCroppedBitmap!!
                 } else {
-                    bitmap
+                    reusableRawBitmap!!
                 }
 
-                val stream = ByteArrayOutputStream()
-                finalBitmap.compress(Bitmap.CompressFormat.JPEG, 60, stream)
-                val jpegBytes = stream.toByteArray()
+                reusableOutputStream.reset()
+                finalBitmap.compress(Bitmap.CompressFormat.JPEG, 50, reusableOutputStream)
+                val jpegBytes = reusableOutputStream.toByteArray()
 
                 FrameStreamHandler.sendFrame(jpegBytes, targetWidth, targetHeight)
-
-                if (finalBitmap != bitmap) {
-                    bitmap.recycle()
-                }
-                finalBitmap.recycle()
             } catch (e: Exception) {
                 // Ignore transient frame buffer errors
             } finally {
@@ -277,6 +283,11 @@ class ScreenCaptureService : Service() {
 
             mediaProjection?.stop()
             mediaProjection = null
+
+            reusableRawBitmap?.recycle()
+            reusableRawBitmap = null
+            reusableCroppedBitmap?.recycle()
+            reusableCroppedBitmap = null
         } catch (_: Exception) {}
     }
 
